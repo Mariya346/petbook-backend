@@ -1,4 +1,7 @@
 import logging
+import cloudinary
+import cloudinary.uploader
+
 import os
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -21,6 +24,12 @@ from starlette.middleware.cors import CORSMiddleware
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    secure=True,
+)
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(
@@ -91,7 +100,8 @@ class Pet(PetIn):
 
 class PostIn(BaseModel):
     caption: str
-    image: Optional[str] = None  # base64 data URI
+    media: Optional[str] = None
+    media_type: Optional[str] = "image"
     pet_id: Optional[str] = None
     tags: List[str] = []
     is_reel: bool = False
@@ -187,6 +197,21 @@ class CheckoutIn(BaseModel):
     origin_url: str
 
 # ---------------- Helpers ----------------
+def upload_to_cloudinary(file_data, media_type="image"):
+    if not file_data:
+        return None
+
+    try:
+        result = cloudinary.uploader.upload(
+            file_data,
+            resource_type="auto"
+        )
+
+        return result["secure_url"]
+
+    except Exception as e:
+        print("Cloudinary Upload Error:", e)
+        return None
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -369,9 +394,20 @@ async def list_posts(is_reel: Optional[bool] = None):
 @api_router.post("/posts", response_model=Post)
 async def create_post(body: PostIn, user=Depends(get_current_user)):
     pet_name = None
+
     if body.pet_id:
         pet = await db.pets.find_one({"id": body.pet_id}, {"_id": 0})
-        if pet: pet_name = pet.get("name")
+        if pet:
+            pet_name = pet.get("name")
+
+    media_url = None
+
+    if body.media:
+        media_url = upload_to_cloudinary(
+            body.media,
+            body.media_type
+        )
+
     post = {
         "id": str(uuid.uuid4()),
         "author_id": user["id"],
@@ -380,7 +416,8 @@ async def create_post(body: PostIn, user=Depends(get_current_user)):
         "pet_id": body.pet_id,
         "pet_name": pet_name,
         "caption": body.caption,
-        "image": body.image,
+        "media": media_url,
+        "media_type": body.media_type,
         "tags": body.tags,
         "is_reel": body.is_reel,
         "likes": 0,
@@ -388,6 +425,7 @@ async def create_post(body: PostIn, user=Depends(get_current_user)):
         "comments_count": 0,
         "created_at": now_iso(),
     }
+
     await db.posts.insert_one(post)
     post.pop("_id", None)
     return post
