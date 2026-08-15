@@ -13,7 +13,16 @@ import bcrypt
 import certifi
 import stripe
 from dotenv import load_dotenv
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
+from fastapi import (
+    FastAPI,
+    APIRouter,
+    HTTPException,
+    Depends,
+    Header,
+    UploadFile,
+    File,
+    Form,
+)
 from fastapi.responses import StreamingResponse
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
@@ -113,15 +122,22 @@ class Post(BaseModel):
     author_avatar: Optional[str] = None
     pet_id: Optional[str] = None
     pet_name: Optional[str] = None
+
     caption: str
-    image: Optional[str] = None
+
+    media: Optional[str] = None
+    media_type: str = "image"
+
     tags: List[str] = []
+
     likes: int = 0
     liked_by: List[str] = []
-    comments_count: int = 0
-    is_reel: bool = False
-    created_at: str
 
+    comments_count: int = 0
+
+    is_reel: bool = False
+
+    created_at: str
 class CommentIn(BaseModel):
     text: str
 
@@ -197,21 +213,18 @@ class CheckoutIn(BaseModel):
     origin_url: str
 
 # ---------------- Helpers ----------------
-def upload_to_cloudinary(file_data, media_type="image"):
-    if not file_data:
-        return None
+def upload_to_cloudinary(file, media_type="image"):
+ try:
+    result = cloudinary.uploader.upload(
+        file.file,
+        resource_type="auto"
+    )
 
-    try:
-        result = cloudinary.uploader.upload(
-            file_data,
-            resource_type="auto"
-        )
+    return result["secure_url"]
 
-        return result["secure_url"]
-
-    except Exception as e:
-        print("Cloudinary Upload Error:", e)
-        return None
+ except Exception as e:
+    print(e)
+    return None
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -392,20 +405,29 @@ async def list_posts(is_reel: Optional[bool] = None):
     return items
 
 @api_router.post("/posts", response_model=Post)
-async def create_post(body: PostIn, user=Depends(get_current_user)):
+async def create_post(
+        caption: str = Form(...),
+        media_type: str = Form("image"),
+        pet_id: Optional[str] = Form(None),
+        tags: str = Form(""),
+        is_reel: bool = Form(False),
+        media: UploadFile = File(...),
+        user=Depends(get_current_user),
+):
     pet_name = None
 
-    if body.pet_id:
-        pet = await db.pets.find_one({"id": body.pet_id}, {"_id": 0})
+    if pet_id:
+        pet = await db.pets.find_one({"id": pet_id}, {"_id": 0})
         if pet:
             pet_name = pet.get("name")
 
-    media_url = None
+    media_url = upload_to_cloudinary(media)
+    print("MEDIA URL:", media_url)
 
-    if body.media:
-        media_url = upload_to_cloudinary(
-            body.media,
-            body.media_type
+    if media_url is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Cloudinary upload failed"
         )
 
     post = {
@@ -413,23 +435,23 @@ async def create_post(body: PostIn, user=Depends(get_current_user)):
         "author_id": user["id"],
         "author_name": user["name"],
         "author_avatar": user.get("avatar"),
-        "pet_id": body.pet_id,
+        "pet_id": pet_id,
         "pet_name": pet_name,
-        "caption": body.caption,
+        "caption": caption,
         "media": media_url,
-        "media_type": body.media_type,
-        "tags": body.tags,
-        "is_reel": body.is_reel,
+        "media_type": media_type,
+        "tags": tags.split(",") if tags else [],
         "likes": 0,
         "liked_by": [],
         "comments_count": 0,
+        "is_reel": is_reel,
         "created_at": now_iso(),
     }
 
     await db.posts.insert_one(post)
     post.pop("_id", None)
-    return post
 
+    return post
 @api_router.post("/posts/{post_id}/like")
 async def toggle_like(post_id: str, user=Depends(get_current_user)):
     post = await db.posts.find_one({"id": post_id}, {"_id": 0})
