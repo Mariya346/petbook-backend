@@ -67,9 +67,18 @@ class UserRegister(BaseModel):
     password: str
     name: str
 
+
+
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+
+
+class ProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    bio: Optional[str] = None
+    location: Optional[str] = None
+    avatar: Optional[str] = None
 
 class GoogleAuthIn(BaseModel):
     id_token: str
@@ -294,6 +303,32 @@ async def login(body: UserLogin):
 @api_router.get("/auth/me", response_model=UserOut)
 async def me(user=Depends(get_current_user)):
     return await user_out_async(user)
+@api_router.patch("/auth/me", response_model=UserOut)
+async def update_my_profile(
+        body: ProfileUpdate,
+        user=Depends(get_current_user),
+):
+    updates = body.model_dump(exclude_unset=True)
+
+    if "name" in updates:
+        updates["name"] = updates["name"].strip()
+        if not updates["name"]:
+            raise HTTPException(400, "Name cannot be empty")
+
+    allowed_fields = {"name", "bio", "location", "avatar"}
+    updates = {k: v for k, v in updates.items() if k in allowed_fields}
+
+    if updates:
+        await db.users.update_one(
+            {"id": user["id"]},
+            {"$set": updates},
+        )
+
+    updated_user = await db.users.find_one(
+        {"id": user["id"]},
+        {"_id": 0, "password": 0},
+    )
+    return await user_out_async(updated_user)
 
 @api_router.post("/auth/google", response_model=AuthResponse)
 async def auth_google(body: GoogleAuthIn):
@@ -420,9 +455,14 @@ async def create_post(
         pet = await db.pets.find_one({"id": pet_id}, {"_id": 0})
         if pet:
             pet_name = pet.get("name")
-
+    print("========== UPLOAD START ==========")
+    print("Caption:", caption)
+    print("Media Type:", media_type)
+    print("Is Reel:", is_reel)
+    print("Filename:", media.filename)
     media_url = upload_to_cloudinary(media)
-    print("MEDIA URL:", media_url)
+    print("Cloudinary URL:", media_url)
+    print("========== UPLOAD END ==========")
 
     if media_url is None:
         raise HTTPException(
@@ -452,6 +492,68 @@ async def create_post(
     post.pop("_id", None)
 
     return post
+@api_router.patch("/posts/{post_id}")
+async def update_my_post(
+        post_id: str,
+        body: dict,
+        user=Depends(get_current_user),
+):
+    updates = {
+        key: body[key]
+        for key in ("caption", "tags", "pet_id")
+        if key in body
+    }
+
+    if not updates:
+        raise HTTPException(400, "No valid fields provided")
+
+    post = await db.posts.find_one(
+        {"id": post_id},
+        {"_id": 0},
+    )
+
+    if not post:
+        raise HTTPException(404, "Post not found")
+
+    if post["author_id"] != user["id"]:
+        raise HTTPException(403, "You can only edit your own posts")
+
+    await db.posts.update_one(
+        {"id": post_id},
+        {"$set": updates},
+    )
+
+    return await db.posts.find_one(
+        {"id": post_id},
+        {"_id": 0},
+    )
+
+
+
+@api_router.delete("/posts/{post_id}")
+async def delete_my_post(
+        post_id: str,
+        user=Depends(get_current_user),
+):
+    post = await db.posts.find_one({"id": post_id})
+
+    if not post:
+        raise HTTPException(
+            status_code=404,
+            detail="Post not found",
+        )
+
+    if post.get("author_id") != user["id"]:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only delete your own posts",
+        )
+
+    await db.posts.delete_one({"id": post_id})
+    await db.comments.delete_many({"post_id": post_id})
+
+    return {"deleted": True, "id": post_id}
+
 @api_router.post("/posts/{post_id}/like")
 async def toggle_like(post_id: str, user=Depends(get_current_user)):
     post = await db.posts.find_one({"id": post_id}, {"_id": 0})
