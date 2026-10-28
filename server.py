@@ -195,6 +195,14 @@ class HealthRecord(BaseModel):
     status: str
     kind: str
 
+class HealthRecordCreate(BaseModel):
+    pet_id: str
+    title: str
+    detail: str
+    date: str
+    status: str = "upcoming"
+    kind: str = "other"
+
 class ChatMessageAI(BaseModel):
     role: str
     text: str
@@ -609,15 +617,56 @@ async def list_services(category: Optional[str] = None):
     return items
 
 # ---------------- Health Records ----------------
+async def get_owned_pet(pet_id: str, user: dict) -> dict:
+    pet = await db.pets.find_one({"id": pet_id}, {"_id": 0})
+    if not pet:
+        raise HTTPException(status_code=404, detail="Animal not found")
+    if pet.get("owner_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="You can only access health records for your own animals")
+    return pet
+
+
 @api_router.get("/health/{pet_id}", response_model=List[HealthRecord])
-async def list_health(pet_id: str):
+async def list_health(pet_id: str, user=Depends(get_current_user)):
+    # Health data is private to the animal's owner.
+    await get_owned_pet(pet_id, user)
     items = await db.health.find({"pet_id": pet_id}, {"_id": 0}).sort("date", 1).to_list(500)
     return items
 
+
 @api_router.post("/health", response_model=HealthRecord)
-async def add_health(record: HealthRecord, user=Depends(get_current_user)):
-    await db.health.insert_one(record.model_dump())
-    return record
+async def add_health(record: HealthRecordCreate, user=Depends(get_current_user)):
+    await get_owned_pet(record.pet_id, user)
+    if record.status not in {"upcoming", "done", "completed"}:
+        raise HTTPException(status_code=400, detail="Status must be upcoming or done")
+    allowed_kinds = {"vaccination", "vet_visit", "medication", "test", "allergy", "surgery", "other"}
+    if record.kind not in allowed_kinds:
+        raise HTTPException(status_code=400, detail="Unsupported health record type")
+    item = {
+        "id": str(uuid.uuid4()),
+        "pet_id": record.pet_id,
+        "title": record.title.strip(),
+        "detail": record.detail.strip(),
+        "date": record.date.strip(),
+        "status": record.status,
+        "kind": record.kind,
+        "created_by": user["id"],
+        "created_at": now_iso(),
+    }
+    if not item["title"] or not item["detail"] or not item["date"]:
+        raise HTTPException(status_code=400, detail="Title, details and date are required")
+    await db.health.insert_one(item)
+    return {key: value for key, value in item.items() if key not in {"created_by", "created_at"}}
+
+
+@api_router.delete("/health/record/{record_id}")
+async def delete_health_record(record_id: str, user=Depends(get_current_user)):
+    record = await db.health.find_one({"id": record_id}, {"_id": 0})
+    if not record:
+        raise HTTPException(status_code=404, detail="Health record not found")
+    await get_owned_pet(record["pet_id"], user)
+    await db.health.delete_one({"id": record_id})
+    return {"deleted": True, "id": record_id}
 
 # ---------------- Messaging (DMs) ----------------
 def chat_key(a: str, b: str) -> str:
