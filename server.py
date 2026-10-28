@@ -194,6 +194,8 @@ class HealthRecord(BaseModel):
     date: str
     status: str
     kind: str
+    next_due_date: Optional[str] = None
+    interval_months: Optional[int] = None
 
 class HealthRecordCreate(BaseModel):
     pet_id: str
@@ -202,6 +204,8 @@ class HealthRecordCreate(BaseModel):
     date: str
     status: str = "upcoming"
     kind: str = "other"
+    next_due_date: Optional[str] = None
+    interval_months: Optional[int] = None
 
 class ChatMessageAI(BaseModel):
     role: str
@@ -650,6 +654,8 @@ async def add_health(record: HealthRecordCreate, user=Depends(get_current_user))
         "date": record.date.strip(),
         "status": record.status,
         "kind": record.kind,
+        "next_due_date": record.next_due_date.strip() if record.next_due_date else None,
+        "interval_months": record.interval_months if record.interval_months and record.interval_months > 0 else None,
         "created_by": user["id"],
         "created_at": now_iso(),
     }
